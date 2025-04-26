@@ -2,6 +2,7 @@
 import os
 import json
 import time
+import socket
 import threading
 import tkinter as tk
 from tkinter import messagebox, simpledialog, filedialog
@@ -17,7 +18,7 @@ ALLOWED_FILE_TYPES = [
     ('PDF files', '*.pdf'),
     ('Images', '*.png *.jpg *.jpeg *.gif'),
     ('Documents', '*.doc *.docx'),
-    ('All files', '*.*')  # Keep this for user convenience, we'll validate after selection
+    ('All files', '*.*')  # Keep this for user convenience, validate after selection
 ]
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB limit
 
@@ -27,14 +28,20 @@ class ChatApp:
         self.root.title("P2P Chat App")
         self.root.geometry("800x600")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        
+
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
         
         self.controller = NodeController()
-        self.node_address = "127.0.0.1:7091"  # Default node address
+    
+        # Determine local IP address
+        self.node_address = self.get_local_ip()
+        if ":" not in self.node_address:
+            self.node_address += ":7091"  # Add default port if needed
+        
         self.connected_peers = {}
         self.selected_peer = None
+        
         self.downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads", "P2PChatApp")
         os.makedirs(self.downloads_folder, exist_ok=True)
         
@@ -71,14 +78,22 @@ class ChatApp:
         
         self.add_peer_button = ctk.CTkButton(self.peers_frame, text="Add Peer", command=self.add_peer)
         self.add_peer_button.pack(padx=5, pady=5, fill=tk.X)
-        
+
         self.chat_frame = ctk.CTkFrame(self.content_frame)
         self.chat_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=5, pady=5, expand=True)
-        
+
+        # Create the chat display with CustomTkinter's CTkTextbox
         self.chat_display = ctk.CTkTextbox(self.chat_frame, width=400, height=400)
         self.chat_display.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.chat_display.configure(state=tk.DISABLED)
         
+        # Get the underlying tkinter Text widget from CTkTextbox for tag configuration
+        self._text_widget = self.chat_display._textbox
+        self._text_widget.tag_configure("status_tag", foreground="gray")
+        
+        # Create a dictionary to store tag callbacks for file downloads
+        self.download_callbacks = {}
+
         self.message_frame = ctk.CTkFrame(self.chat_frame)
         self.message_frame.pack(fill=tk.X, padx=5, pady=5)
         
@@ -99,6 +114,17 @@ class ChatApp:
         self.polling_thread.daemon = True
         self.polling_thread.start()
     
+    def get_local_ip(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            return f"{ip}:7091"
+        except Exception:
+            return "127.0.0.1:7091"  # Fallback to localhost
+        finally:
+            s.close()
+
     def connect_to_node(self):
         self.node_address = self.node_entry.get()
         if not self.node_address:
@@ -166,23 +192,47 @@ class ChatApp:
         self.chat_display.configure(state=tk.NORMAL)
         self.chat_display.delete("1.0", tk.END)
         
+        # Clear all previous download callbacks
+        self.download_callbacks.clear()
+        
         if peer in self.connected_peers:
             for msg in self.connected_peers[peer].get("messages", []):
                 sender = msg.get("sender", "Unknown")
                 content = msg.get("content", "")
+                
                 if msg.get("type") == "file":
                     file_name = msg.get("filename", "unknown")
                     self.chat_display.insert(tk.END, f"{sender}: Sent file: {file_name}\n")
                     
                     # Add clickable download link if it's a received file
                     if sender != "You":
-                        tag_name = f"file_{hash(file_name)}"
-                        self.chat_display.insert(tk.END, f"[Download File]\n", tag_name)
-                        self.chat_display.tag_configure(tag_name, foreground="blue", underline=1)
-                        self.chat_display.tag_bind(tag_name, "<Button-1>", 
-                                                  lambda e, f=msg: self.save_received_file(f))
+                        tag_name = f"file_{hash(file_name)}_{int(time.time()*1000)}"
+                        
+                        # Store file info in our callbacks dictionary
+                        self.download_callbacks[tag_name] = msg
+                        
+                        # Insert clickable text with the tag
+                        self.chat_display.insert(tk.END, "[Download File]\n")
+                        
+                        # Configure the tag for the underlying text widget
+                        start_pos = self.chat_display._textbox.index(f"end-2l")
+                        end_pos = self.chat_display._textbox.index(f"end-1l")
+                        self.chat_display._textbox.tag_add(tag_name, start_pos, end_pos)
+                        self.chat_display._textbox.tag_configure(tag_name, foreground="blue", underline=1)
+                        self.chat_display._textbox.tag_bind(tag_name, "<Button-1>", 
+                                              lambda e, t=tag_name: self.save_received_file(self.download_callbacks[t]))
                 else:
                     self.chat_display.insert(tk.END, f"{sender}: {content}\n")
+                    
+                    # Show status for sent messages
+                    if sender == "You" and "status" in msg:
+                        status = msg.get("status", "")
+                        self.chat_display.insert(tk.END, f"    {status}\n")
+                        
+                        # Apply status tag to the underlying text widget
+                        start_pos = self.chat_display._textbox.index(f"end-2l")
+                        end_pos = self.chat_display._textbox.index(f"end-1l")
+                        self.chat_display._textbox.tag_add("status_tag", start_pos, end_pos)
         
         self.chat_display.configure(state=tk.DISABLED)
     
@@ -345,25 +395,45 @@ class ChatApp:
     
     def process_response(self, response):
         if response.startswith("CHAT:"):
+                parts = response.split(":", 2)
+                if len(parts) >= 3:
+                    peer = parts[1]
+                    message = parts[2]
+                    
+                    if self.selected_peer == peer:
+                        self.add_chat_message(peer, message)
+                    else:
+                        self.add_chat_message("System", f"New message from {peer}")
+                        
+                        if peer not in self.connected_peers:
+                            self.connected_peers[peer] = {"messages": []}
+                        
+                        self.connected_peers[peer]["messages"].append({
+                            "sender": peer,
+                            "content": message,
+                            "timestamp": time.time()
+                        })
+        elif response.startswith("DELIVERED:"):
             parts = response.split(":", 2)
             if len(parts) >= 3:
                 peer = parts[1]
                 message = parts[2]
                 
                 if self.selected_peer == peer:
-                    self.add_chat_message(peer, message)
+                    # Update the last message with "delivered" status if it matches
+                    self.update_message_status(peer, message, "✓ Delivered")
+                
+        elif response.startswith("FAILED:"):
+            parts = response.split(":", 3)
+            if len(parts) >= 4:
+                peer = parts[1]
+                message = parts[2]
+                error = parts[3]
+                
+                if self.selected_peer == peer:
+                    self.update_message_status(peer, message, f"❌ Failed: {error}")
                 else:
-                    self.add_chat_message("System", f"New message from {peer}")
-                    
-                    if peer not in self.connected_peers:
-                        self.connected_peers[peer] = {"messages": []}
-                    
-                    self.connected_peers[peer]["messages"].append({
-                        "sender": peer,
-                        "content": message,
-                        "timestamp": time.time()
-                    })
-        
+                    self.add_chat_message("System", f"Failed to send message to {peer}: {error}")
         elif response.startswith("FILE:"):
             try:
                 parts = response.split(":", 2)
@@ -408,7 +478,22 @@ class ChatApp:
         
         else:
             self.add_chat_message("System", response.strip())
-    
+            
+    def update_message_status(self, peer, message_content, status):
+        if peer not in self.connected_peers:
+            return
+        
+        message_found = False
+        for msg in self.connected_peers[peer]["messages"]:
+            if msg.get("sender") == "You" and msg.get("content") == message_content:
+                if "status" not in msg:
+                    message_found = True
+                    msg["status"] = status
+                    break
+        
+        if message_found:
+            self.display_chat_history(peer)
+
     def on_close(self):
         if self.node_address:
             self.controller.exit_node(self.node_address)

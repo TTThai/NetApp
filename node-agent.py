@@ -104,7 +104,6 @@ def get_list():
     fetch(TRACKER_ADDRESS, "get_list", {}, on_response)
 
 def send_chat_message(peer, message):
-    """Send a chat message to a peer"""
     if peer not in PEERS:
         print(f"agent: Peer {peer} not connected")
         write_response(f"Error: Peer {peer} not connected")
@@ -112,7 +111,16 @@ def send_chat_message(peer, message):
     
     def on_response(response):
         print(f"agent: peer {peer} responded to chat: \"{response}\"")
-        write_response(f"Message sent to {peer}")
+        regexp = RegExpBuffer()
+        if regexp.match(re_result, response):
+            body = regexp.group(1)
+            result = json.loads(body)
+            if result["status"] == "OK":
+                write_response(f"DELIVERED:{peer}:{message}")
+            else:
+                write_response(f"FAILED:{peer}:{message}:{result.get('message', 'Unknown error')}")
+        else:
+            write_response(f"FAILED:{peer}:{message}:Invalid response format")
     
     if isinstance(peer, str) and ":" in peer:
         host, port = peer.split(":")
