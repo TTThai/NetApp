@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# This node agent is used to test p2p connection
 import os
 import json
 import re
@@ -9,7 +10,7 @@ from lib.server import listen
 from lib.cancellable import Cancellable
 from lib.regexp import RegExpBuffer
 
-NODE_ADDRESS = ("127.0.0.1", 7091)  # Note: change later
+NODE_ADDRESS = ("127.0.0.1", 7092)  # Note: change later
 TRACKER_ADDRESS = ("127.0.0.1", 7090)
 
 re_peer_connect = re.compile(r"^peer_connect:(.+)$")

@@ -7,12 +7,10 @@ from pathlib import Path
 class NodeController:
     def __init__(self, app_path=None):
         if app_path is None:
-            # Default to current directory
             self.app_path = os.path.dirname(os.path.abspath(__file__))
         else:
             self.app_path = app_path
         
-        # Create _nodes directory if it doesn't exist
         self.nodes_dir = os.path.join(self.app_path, "_nodes")
         os.makedirs(self.nodes_dir, exist_ok=True)
     
@@ -62,6 +60,13 @@ class NodeController:
             "message": message
         }
         return self.send_command(node_address, "chat", data)
+    
+    def send_file(self, node_address, peer_address, file_data):
+        data = {
+            "peer": peer_address,
+            "file": file_data
+        }
+        return self.send_command(node_address, "file", data)
 
 if __name__ == "__main__":
     controller = NodeController()

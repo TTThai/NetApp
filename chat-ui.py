@@ -4,9 +4,22 @@ import json
 import time
 import threading
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox, simpledialog, filedialog
 import customtkinter as ctk
 from node_controller import NodeController
+import base64
+import hashlib
+from pathlib import Path
+
+# Define allowed file types and size limit
+ALLOWED_FILE_TYPES = [
+    ('Text files', '*.txt'),
+    ('PDF files', '*.pdf'),
+    ('Images', '*.png *.jpg *.jpeg *.gif'),
+    ('Documents', '*.doc *.docx'),
+    ('All files', '*.*')  # Keep this for user convenience, we'll validate after selection
+]
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB limit
 
 class ChatApp:
     def __init__(self, root):
@@ -22,6 +35,8 @@ class ChatApp:
         self.node_address = "127.0.0.1:7091"  # Default node address
         self.connected_peers = {}
         self.selected_peer = None
+        self.downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads", "P2PChatApp")
+        os.makedirs(self.downloads_folder, exist_ok=True)
         
         self.main_frame = ctk.CTkFrame(self.root)
         self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -155,7 +170,19 @@ class ChatApp:
             for msg in self.connected_peers[peer].get("messages", []):
                 sender = msg.get("sender", "Unknown")
                 content = msg.get("content", "")
-                self.chat_display.insert(tk.END, f"{sender}: {content}\n")
+                if msg.get("type") == "file":
+                    file_name = msg.get("filename", "unknown")
+                    self.chat_display.insert(tk.END, f"{sender}: Sent file: {file_name}\n")
+                    
+                    # Add clickable download link if it's a received file
+                    if sender != "You":
+                        tag_name = f"file_{hash(file_name)}"
+                        self.chat_display.insert(tk.END, f"[Download File]\n", tag_name)
+                        self.chat_display.tag_configure(tag_name, foreground="blue", underline=1)
+                        self.chat_display.tag_bind(tag_name, "<Button-1>", 
+                                                  lambda e, f=msg: self.save_received_file(f))
+                else:
+                    self.chat_display.insert(tk.END, f"{sender}: {content}\n")
         
         self.chat_display.configure(state=tk.DISABLED)
     
@@ -194,8 +221,115 @@ class ChatApp:
         
         self.message_entry.delete(0, tk.END)
     
+    def validate_file(self, file_path):
+        # Check if file exists
+        if not os.path.exists(file_path):
+            return False, "File does not exist"
+        
+        # Check file size
+        file_size = os.path.getsize(file_path)
+        if file_size > MAX_FILE_SIZE:
+            return False, f"File too large. Maximum size is {MAX_FILE_SIZE/1024/1024:.1f} MB"
+        
+        # Check file extension - basic validation
+        file_ext = os.path.splitext(file_path)[1].lower()
+        valid_extensions = ['.txt', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.doc', '.docx']
+        
+        if file_ext not in valid_extensions:
+            return False, f"Invalid file type. Allowed types: {', '.join(valid_extensions)}"
+            
+        return True, "File valid"
+    
     def send_file(self):
-        messagebox.showinfo("File Sharing", "File sharing functionality will be implemented in a future update.")
+        if not self.selected_peer:
+            messagebox.showerror("Error", "Please select a peer first")
+            return
+        
+        if not self.node_address:
+            messagebox.showerror("Error", "Please connect to a node first")
+            return
+        
+        file_path = filedialog.askopenfilename(
+            title="Select a file to send",
+            filetypes=ALLOWED_FILE_TYPES
+        )
+        
+        if not file_path:
+            return  # User cancelled selection
+        
+        valid, message = self.validate_file(file_path)
+        if not valid:
+            messagebox.showerror("Invalid File", message)
+            return
+        
+        # Read and encode the file
+        try:
+            with open(file_path, 'rb') as file:
+                file_data = file.read()
+                file_encoded = base64.b64encode(file_data).decode('utf-8')
+            
+            file_name = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            file_type = os.path.splitext(file_path)[1]
+            file_hash = hashlib.md5(file_data).hexdigest()
+            
+            # Create file message
+            file_message = {
+                "type": "file",
+                "filename": file_name,
+                "size": file_size,
+                "filetype": file_type,
+                "hash": file_hash,
+                "data": file_encoded
+            }
+            
+            # Send the file message
+            self.controller.send_file(self.node_address, self.selected_peer, file_message)
+            
+            # Update UI and history
+            if self.selected_peer not in self.connected_peers:
+                self.connected_peers[self.selected_peer] = {"messages": []}
+            
+            self.connected_peers[self.selected_peer]["messages"].append({
+                "sender": "You",
+                "type": "file",
+                "filename": file_name,
+                "size": file_size,
+                "filetype": file_type,
+                "hash": file_hash,
+                "timestamp": time.time()
+            })
+            
+            self.add_chat_message("System", f"Sending file: {file_name} ({file_size/1024:.1f} KB)")
+            self.display_chat_history(self.selected_peer)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to send file: {str(e)}")
+    
+    def save_received_file(self, file_info):
+        try:
+            if "data" not in file_info:
+                messagebox.showerror("Error", "File data not available")
+                return
+            
+            file_name = file_info.get("filename", "received_file")
+            file_data = base64.b64decode(file_info["data"])
+            
+            # Create a safe file path
+            save_path = os.path.join(self.downloads_folder, file_name)
+            count = 1
+            while os.path.exists(save_path):
+                base_name, ext = os.path.splitext(file_name)
+                save_path = os.path.join(self.downloads_folder, f"{base_name}_{count}{ext}")
+                count += 1
+            
+            # Save the file
+            with open(save_path, 'wb') as file:
+                file.write(file_data)
+            
+            messagebox.showinfo("File Downloaded", f"File saved to: {save_path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save file: {str(e)}")
     
     def poll_responses(self):
         while self.polling_active:
@@ -230,6 +364,38 @@ class ChatApp:
                         "timestamp": time.time()
                     })
         
+        elif response.startswith("FILE:"):
+            try:
+                parts = response.split(":", 2)
+                if len(parts) >= 3:
+                    peer = parts[1]
+                    file_data_str = parts[2]
+                    file_data = json.loads(file_data_str)
+                    
+                    # Add to chat history
+                    if peer not in self.connected_peers:
+                        self.connected_peers[peer] = {"messages": []}
+                    
+                    self.connected_peers[peer]["messages"].append({
+                        "sender": peer,
+                        "type": "file",
+                        "filename": file_data.get("filename", "unknown"),
+                        "size": file_data.get("size", 0),
+                        "filetype": file_data.get("filetype", ""),
+                        "hash": file_data.get("hash", ""),
+                        "data": file_data.get("data", ""),
+                        "timestamp": time.time()
+                    })
+                    
+                    # Update display if this peer is selected
+                    if self.selected_peer == peer:
+                        self.add_chat_message("System", f"Received file from {peer}: {file_data.get('filename')}")
+                        self.display_chat_history(peer)
+                    else:
+                        self.add_chat_message("System", f"Received file from {peer}")
+            except Exception as e:
+                print(f"Error processing file: {e}")
+        
         elif response.startswith("Peer ") and "connected" in response:
             try:
                 peer = response.split(" ")[1]
@@ -237,14 +403,13 @@ class ChatApp:
                     self.connected_peers[peer] = {"messages": []}
                     self.update_peers_list()
                     self.add_chat_message("System", f"New peer connected: {peer}")
-            except:
-                pass
+            except Exception as e:
+                print(f"Error processing peer connection: {e}")
         
         else:
             self.add_chat_message("System", response.strip())
     
     def on_close(self):
-        """Handle the window close event"""
         if self.node_address:
             self.controller.exit_node(self.node_address)
         
